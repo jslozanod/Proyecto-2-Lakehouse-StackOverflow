@@ -1,0 +1,11 @@
+# Imagen de Airflow (apache/airflow:2.9.0).
+# El core de Airflow va fijado: sin este pin, pip puede actualizarlo en silencio
+# al instalar los providers y dejar roto el comando "airflow".
+apache-airflow==2.9.0
+apache-airflow-providers-apache-spark==5.2.1
+pyspark==3.5.5
+dlt[filesystem]==1.30.0
+pyarrow
+# s3fs y aiobotocore recientes: la imagen base trae un aiobotocore viejo que no es compatible con
+# el s3fs que usa DLT (error "unexpected keyword argument 'response_checksum_validation'").
+s3fs[boto3]>=2026.9

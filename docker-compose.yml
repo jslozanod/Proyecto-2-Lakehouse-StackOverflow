@@ -1,0 +1,325 @@
+﻿# =====================================================================================
+#  PROYECTO 2 - Arquitectura Lakehouse (Medallion) con el dataset de StackOverflow
+#  Frameworks y Herramientas para Big Data - Grupo 3
+#
+#  Flujo:  DLT -> Bronze (Parquet, MinIO)  ->  Spark -> Silver (Iceberg, merge)
+#                                           ->  Spark -> Gold   (Iceberg, merge)
+#  Orquestado por Airflow (1 DAG, 3 tareas). Consulta con Trino (Silver) y Dremio (Gold).
+#
+#  Credenciales de laboratorio (las mismas en todos los servicios): admin / password
+#  Despliegue:  docker compose up -d --build     (ver README.md)
+# =====================================================================================
+
+# ---------- Variables comunes (anclas YAML) ----------
+
+# Credenciales S3 (MinIO) que leen Spark, DLT y los notebooks desde el entorno
+x-s3-env: &s3-env
+  AWS_ACCESS_KEY_ID: admin
+  AWS_SECRET_ACCESS_KEY: password
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+
+# Configuracion comun de Airflow (LocalExecutor: las tareas corren en el scheduler)
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+    additional_contexts:
+      sparkdist: "service:spark-master"   # reutiliza la distribucion de Spark del cluster
+  image: lakehouse-airflow:2.9.0
+  environment: &airflow-env
+    <<: *s3-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://admin:password@postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # DLT (Bronze): destino = bucket "bronze" de MinIO
+    DESTINATION__FILESYSTEM__BUCKET_URL: s3://bronze
+    DESTINATION__FILESYSTEM__CREDENTIALS__AWS_ACCESS_KEY_ID: admin
+    DESTINATION__FILESYSTEM__CREDENTIALS__AWS_SECRET_ACCESS_KEY: password
+    DESTINATION__FILESYSTEM__CREDENTIALS__ENDPOINT_URL: http://minio:9000
+    DESTINATION__FILESYSTEM__CREDENTIALS__REGION_NAME: us-east-1
+    DLT_PROJECT_DIR: /tmp/dlt
+    RUNTIME__DLTHUB_TELEMETRY: "false"
+    # Origen de users para el pipeline y recorte de fechas (ver README)
+    USERS_SOURCE: /data/raw/users.parquet
+    USERS_YEAR: "2021"
+    FECHA_DESDE_MES: "1"
+    FECHA_HASTA_MES: "6"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./jobs:/opt/airflow/jobs
+    - ./logs:/opt/airflow/logs
+    - ./data:/data:ro
+  networks: [lakehouse_net]
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ------------------------------------------------------------------ ALMACENAMIENTO
+  # MinIO: object storage compatible con S3. Buckets: bronze, silver, gold, warehouse.
+  minio:
+    image: minio/minio:latest
+    container_name: lakehouse_minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Consola web
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 768m
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+  # Crea los buckets de la arquitectura Medallion al arrancar (idempotente)
+  minio-init:
+    image: minio/mc:latest
+    container_name: lakehouse_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 admin password &&
+      mc mb --ignore-existing local/bronze local/silver local/gold local/warehouse &&
+      mc ls local"
+    networks: [lakehouse_net]
+
+  # ------------------------------------------------------------------ BASE DE DATOS
+  # PostgreSQL: guarda los metadatos de Airflow (db "airflow") y el catalogo Nessie (db "nessie")
+  postgres:
+    image: postgres:16
+    container_name: lakehouse_postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 768m
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+  # ------------------------------------------------------------------ CATALOGO
+  # Nessie: catalogo de metadatos de Iceberg (versionado tipo Git). PERSISTENTE en PostgreSQL.
+  nessie:
+    image: ghcr.io/projectnessie/nessie:latest
+    container_name: lakehouse_nessie
+    ports:
+      - "19120:19120"
+    environment:
+      nessie.version.store.type: JDBC
+      nessie.version.store.persist.jdbc.datasource: postgresql
+      quarkus.datasource.postgresql.jdbc.url: jdbc:postgresql://postgres:5432/nessie
+      quarkus.datasource.postgresql.username: admin
+      quarkus.datasource.postgresql.password: password
+      nessie.catalog.default-warehouse: warehouse
+      nessie.catalog.warehouses.warehouse.location: s3://warehouse/
+      nessie.catalog.service.s3.default-options.endpoint: http://minio:9000/
+      nessie.catalog.service.s3.default-options.path-style-access: "true"
+      nessie.catalog.service.s3.default-options.region: us-east-1
+      nessie.catalog.service.s3.default-options.auth-type: STATIC
+      nessie.catalog.service.s3.default-options.access-key: urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
+      nessie.catalog.secrets.access-key.name: admin
+      nessie.catalog.secrets.access-key.secret: password
+      nessie.server.authentication.enabled: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    mem_limit: 1g
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+  # ------------------------------------------------------------------ PROCESAMIENTO
+  # Spark (standalone): master + worker. Imagen propia con JARs de Iceberg, Nessie y S3 incluidos.
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    image: lakehouse-spark:3.5.5
+    container_name: lakehouse_spark_master
+    user: root
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "9090:8080"   # UI del master
+      - "7077:7077"   # puerto del cluster
+    environment:
+      <<: *s3-env
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    mem_limit: 768m
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+  spark-worker:
+    image: lakehouse-spark:3.5.5
+    container_name: lakehouse_spark_worker
+    user: root
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      <<: *s3-env
+      SPARK_WORKER_CORES: "3"
+      SPARK_WORKER_MEMORY: "3g"
+      SPARK_WORKER_WEBUI_PORT: "8081"
+    ports:
+      - "9091:8081"   # UI del worker
+    depends_on: [spark-master]
+    mem_limit: 4g
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+  # ------------------------------------------------------------------ ORQUESTACION
+  # Airflow: inicializa la base de datos, crea el usuario y la conexion "spark_default"
+  airflow-init:
+    <<: *airflow-common
+    container_name: lakehouse_airflow_init
+    user: "0:0"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags
+        chown -R 50000:0 /opt/airflow/logs
+        su airflow -c "
+        airflow db migrate &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true
+        airflow connections delete spark_default || true
+        airflow connections add spark_default --conn-type spark --conn-host spark://spark-master --conn-port 7077
+        "
+
+  # Interfaz web de Airflow
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: lakehouse_airflow_web
+    command: webserver
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    mem_limit: 1536m
+    restart: unless-stopped
+
+  # Scheduler: dispara el DAG y ejecuta las tareas (el driver de Spark corre aqui, el calculo en el cluster)
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: lakehouse_airflow_scheduler
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      spark-worker:
+        condition: service_started
+    mem_limit: 3g
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ EJECUCION MANUAL
+  # Jupyter: notebooks de respaldo (bronze_ingest, silver_transform, gold_agg)
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+      additional_contexts:
+        sparkdist: "service:spark-master"
+    image: lakehouse-jupyter:latest
+    container_name: lakehouse_jupyter
+    command: >
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+      --ServerApp.token='' --ServerApp.password='' --ServerApp.root_dir=/workspace
+    ports:
+      - "8888:8888"
+    environment:
+      <<: *s3-env
+      DESTINATION__FILESYSTEM__BUCKET_URL: s3://bronze
+      DESTINATION__FILESYSTEM__CREDENTIALS__AWS_ACCESS_KEY_ID: admin
+      DESTINATION__FILESYSTEM__CREDENTIALS__AWS_SECRET_ACCESS_KEY: password
+      DESTINATION__FILESYSTEM__CREDENTIALS__ENDPOINT_URL: http://minio:9000
+      DESTINATION__FILESYSTEM__CREDENTIALS__REGION_NAME: us-east-1
+      DLT_PROJECT_DIR: /tmp/dlt
+      RUNTIME__DLTHUB_TELEMETRY: "false"
+      USERS_SOURCE: /data/raw/users.parquet
+      USERS_YEAR: "2021"
+      FECHA_DESDE_MES: "1"
+      FECHA_HASTA_MES: "6"
+    volumes:
+      - ./notebooks:/workspace/notebooks
+      - ./jobs:/workspace/jobs
+      - ./data:/data
+    depends_on: [spark-master, minio-init]
+    mem_limit: 3g
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+  # ------------------------------------------------------------------ CONSULTA SQL
+  # Trino: consulta las tablas de SILVER (y replica GOLD con SQL). Catalogo: lakehouse
+  trino:
+    image: trinodb/trino:483
+    container_name: lakehouse_trino
+    ports:
+      - "8082:8080"
+    environment:
+      # Limita el heap de la JVM: sin esto crece hasta el 80% del limite del contenedor
+      JAVA_TOOL_OPTIONS: "-Xmx2200M"
+    volumes:
+      - ./trino/config.properties:/etc/trino/config.properties:ro
+      - ./trino/catalog/lakehouse.properties:/etc/trino/catalog/lakehouse.properties:ro
+    depends_on: [nessie, minio-init]
+    mem_limit: 3g
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+  # Dremio: consulta las tablas de GOLD (fuente Nessie, ver README para configurarla)
+  dremio:
+    image: dremio/dremio-oss:latest
+    platform: linux/x86_64
+    container_name: lakehouse_dremio
+    ports:
+      - "9047:9047"     # UI
+      - "31010:31010"   # ODBC/JDBC
+      - "32010:32010"   # Arrow Flight
+    environment:
+      DREMIO_JAVA_SERVER_EXTRA_OPTS: "-Xmx2g -XX:MaxDirectMemorySize=1g"
+    volumes:
+      - dremio_data:/opt/dremio/data
+    depends_on: [nessie, minio-init]
+    mem_limit: 4g
+    restart: unless-stopped
+    networks: [lakehouse_net]
+
+volumes:
+  minio_data:
+  postgres_data:
+  dremio_data:
+
+networks:
+  lakehouse_net:
+    driver: bridge

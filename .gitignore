@@ -1,0 +1,22 @@
+# Datos (pesan varios GB, se descargan con el script de preparación)
+data/raw/
+data/prepared/
+data/*.parquet
+
+# Salidas locales de Airflow y Python
+logs/
+**/__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Cache de Spark / Ivy
+.ivy2/
+
+# Editor y sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs de construccion
+*.log

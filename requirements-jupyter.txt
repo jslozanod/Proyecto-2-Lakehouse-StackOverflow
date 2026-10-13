@@ -1,0 +1,9 @@
+﻿# Imagen de Jupyter (ejecucion manual de respaldo).
+# s3fs[boto3] instala boto3 en una version compatible con s3fs (instalarlos por separado genera conflicto).
+jupyterlab>=4,<5
+pyspark==3.5.5
+dlt[filesystem]==1.30.0
+pyarrow
+pandas
+s3fs[boto3]
+duckdb
