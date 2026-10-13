@@ -160,7 +160,8 @@ Para conectarse con DBeaver se usa el driver de Trino con `jdbc:trino://localhos
 También se puede entrar por consola con `docker compose exec trino trino`.
 
 En `sql/trino_replicar_gold.sql` están las consultas: lista las tablas de Silver, calcula otra vez la tabla de Gold leyendo solo de
-Silver y la compara con la tabla `gold.cant_post_x_user_hist`. Las dos diferencias (lo que está en uno y no en el otro) tienen que dar 0.
+Silver y la compara fila por fila con la tabla `gold.cant_post_x_user_hist`. La consulta de validación devuelve cinco números:
+`filas_replica` y `filas_gold` tienen que ser iguales, y `solo_en_replica`, `solo_en_gold` y `filas_con_diferencias` tienen que dar 0.
 Cuando lo corrimos dio 386.559 filas en la réplica y 386.559 en Gold, con 0 diferencias.
 
 ### Dremio: consultar Gold
