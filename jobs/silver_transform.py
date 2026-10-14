@@ -1,14 +1,14 @@
 # %% [markdown]
-# # Silver - transformacion (PySpark + Iceberg)
-# Lee los Parquet de Bronze, los cura (tipos, nulos, duplicados), agrega la columna `fecha_cargue`
-# y los escribe en tablas Iceberg del catalogo Nessie con **MERGE** (nunca override):
+# # Silver - transformación (PySpark + Iceberg)
+# Acá leemos los Parquet de Bronze, los limpiamos (tipos, nulos y duplicados), les agregamos la columna
+# `fecha_cargue` y los escribimos en tablas Iceberg del catálogo Nessie con **MERGE** (nunca override):
 #
-# * `silver.users_hist`: users 2020 + 2021. **La procesa el pipeline de Airflow** (Tarea 2).
-# * `silver.post_hist`: posts 2020 + 2021. Se construye con este mismo script de forma manual
-#   (`--tabla posts`), tal como indica el enunciado.
+# * `silver.users_hist`: users 2020 + 2021. **Esta la procesa el pipeline de Airflow** (Tarea 2).
+# * `silver.post_hist`: posts 2020 + 2021. La armamos a mano con este mismo script (`--tabla posts`),
+#   como dice el enunciado.
 #
-# Cada tabla se crea una sola vez (`CREATE TABLE IF NOT EXISTS` con ubicacion fija en el bucket `silver`),
-# asi ejecutar el script varias veces actualiza la misma tabla y no crea tablas nuevas en MinIO.
+# Cada tabla se crea una sola vez (`CREATE TABLE IF NOT EXISTS`, en una carpeta fija del bucket `silver`).
+# Por eso, si corremos el script varias veces se actualiza la misma tabla y no aparecen tablas nuevas en MinIO.
 
 # %%
 import argparse
@@ -27,14 +27,14 @@ spark = (
     .getOrCreate()
 )
 spark.sparkContext.setLogLevel("WARN")
-# El lector vectorizado de Iceberg (Arrow) tumba la JVM de los ejecutores al leer tablas con datos
-# (SIGSEGV en netty/directBufferAddress); se usa el lector Parquet normal.
+# El lector vectorizado de Iceberg (Arrow) tumbaba la JVM de los ejecutores cuando leía tablas que ya tenían
+# datos (SIGSEGV en netty). Lo desactivamos y Spark usa el lector normal de Parquet.
 spark.conf.set("spark.sql.iceberg.vectorization.enabled", "false")
 spark.sql("CREATE NAMESPACE IF NOT EXISTS nessie.silver")
 
 # %%
 def crear_tabla(nombre, columnas, ubicacion):
-    """Crea la tabla Iceberg solo si no existe, en una ubicacion fija (sin sufijos aleatorios)."""
+    """Crea la tabla Iceberg solo si no existe, siempre en la misma carpeta (sin sufijos al azar)."""
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {nombre} ({columnas})
         USING iceberg
@@ -48,13 +48,13 @@ def crear_tabla(nombre, columnas, ubicacion):
 
 
 def deduplicar(df, clave, orden):
-    """Si la clave aparece varias veces en el origen, se queda con el registro mas reciente."""
+    """Si una misma llave viene repetida, nos quedamos con el registro más reciente."""
     w = Window.partitionBy(clave).orderBy(F.col(orden).desc_nulls_last())
     return df.withColumn("_rn", F.row_number().over(w)).where("_rn = 1").drop("_rn")
 
 
 def merge_en_iceberg(df, destino, condicion):
-    """MERGE INTO: actualiza lo que ya existe e inserta lo nuevo."""
+    """Hace el MERGE: actualiza las filas que ya están en la tabla e inserta las nuevas."""
     df.createOrReplaceTempView("origen_merge")
     spark.sql(f"""
         MERGE INTO {destino} t
@@ -81,7 +81,7 @@ def construir_users_hist():
     curado = (
         bronze.select(
             F.col("Id").cast("long").alias("id"),
-            F.col("Reputation").cast("string").cast("int").alias("reputation"),   # viene como binary
+            F.col("Reputation").cast("string").cast("int").alias("reputation"),   # en el Parquet viene como binary, lo pasamos a texto y luego a número
             F.col("CreationDate").alias("creation_date"),
             F.trim(F.col("DisplayName").cast("string")).alias("display_name"),
             F.col("LastAccessDate").alias("last_access_date"),
@@ -91,7 +91,7 @@ def construir_users_hist():
             F.trim(F.col("Location").cast("string")).alias("location"),
             F.col("AccountId").cast("long").alias("account_id"),
         )
-        .where(F.col("id").isNotNull() & F.col("creation_date").isNotNull())   # calidad: llave y fecha obligatorias
+        .where(F.col("id").isNotNull() & F.col("creation_date").isNotNull())   # regla de calidad: sin id ni fecha de creación no sirve la fila
         .withColumn("anio_creacion", F.year("creation_date"))
     )
     curado = deduplicar(curado, "id", "last_access_date").withColumn("fecha_cargue", F.current_timestamp())
@@ -115,7 +115,7 @@ def construir_post_hist():
 
     bronze = spark.read.parquet("s3a://bronze/post/2020/post_2020.parquet",
                                 "s3a://bronze/post/2021/post_2021.parquet")
-    # Se descartan Body y Title (texto largo que no se usa en las metricas) y se tipan las columnas
+    # Quitamos Body y Title (son textos largos que no usamos en las métricas) y le ponemos tipo a cada columna
     curado = (
         bronze.select(
             F.col("Id").cast("long").alias("id"),
@@ -130,7 +130,7 @@ def construir_post_hist():
             F.col("AnswerCount").cast("int").alias("answer_count"),
             F.col("CommentCount").cast("int").alias("comment_count"),
             F.col("FavoriteCount").cast("int").alias("favorite_count"),
-            F.col("ParentId").cast("string").cast("long").alias("parent_id"),   # viene como binary
+            F.col("ParentId").cast("string").cast("long").alias("parent_id"),   # en el Parquet viene como binary, lo pasamos a texto y luego a número
             F.col("ClosedDate").alias("closed_date"),
         )
         .where(F.col("id").isNotNull() & F.col("creation_date").isNotNull())

@@ -1,12 +1,12 @@
 -- =====================================================================================
--- TRINO: consultas sobre SILVER que replican la tabla GOLD (gold.cant_post_x_user_hist)
--- Catalogo: lakehouse   (Iceberg + Nessie)   |   Conexion JDBC: localhost:8082, usuario "admin"
--- Ejecutar con DBeaver (driver Trino) o con:  docker compose exec trino trino
--- Nota: en los JOIN la tabla agregada (la chica) va a la derecha para que Trino arme en
--- memoria esa y no los 2,5 millones de usuarios.
+-- TRINO: consultas sobre SILVER para replicar la tabla GOLD (gold.cant_post_x_user_hist)
+-- Catálogo: lakehouse (Iceberg + Nessie)  |  Conexión JDBC: localhost:8082, usuario "admin"
+-- Se ejecuta desde DBeaver (driver de Trino) o con:  docker compose exec trino trino
+-- Ojo: en los JOIN dejamos a la derecha la tabla agregada (la pequeña) para que Trino arme en memoria
+-- esa y no los 2,5 millones de usuarios. Así la consulta no llena la memoria.
 -- =====================================================================================
 
--- 1) Las tablas de Silver son consultables desde Trino
+-- 1) Primero comprobamos que Trino ve las tablas de Silver
 SHOW SCHEMAS FROM lakehouse;
 SHOW TABLES FROM lakehouse.silver;
 
@@ -14,7 +14,7 @@ SELECT 'users_hist' AS tabla, count(*) AS filas, min(fecha_cargue) AS fecha_carg
 UNION ALL
 SELECT 'post_hist',           count(*),          min(fecha_cargue)                  FROM lakehouse.silver.post_hist;
 
--- 2) REPLICA de Gold: misma regla de negocio del job gold_agg, leyendo solo de Silver
+-- 2) Réplica de Gold: acá repetimos con SQL la misma regla del job gold_agg, pero leyendo solo de Silver
 SELECT
     u.id                       AS user_id,
     u.display_name,
@@ -48,8 +48,8 @@ JOIN (
 ORDER BY m.total_posts DESC, u.id
 LIMIT 20;
 
--- 3) VALIDACION: se calcula la replica UNA sola vez y se compara contra la tabla Gold,
---    fila por fila (llave user_id + anio_post). IS DISTINCT FROM compara tambien los NULL.
+-- 3) Validación: calculamos la réplica una sola vez y la comparamos con la tabla Gold fila por fila
+--    (llave user_id + anio_post). IS DISTINCT FROM sirve para comparar bien también los valores NULL.
 WITH replica AS (
     SELECT
         u.id AS user_id, u.display_name, u.reputation, u.creation_date AS fecha_registro, u.location,
@@ -91,7 +91,7 @@ SELECT
 FROM replica r
 FULL OUTER JOIN lakehouse.gold.cant_post_x_user_hist g
     ON r.user_id = g.user_id AND r.anio_post = g.anio_post;
--- Resultado esperado: filas_replica = filas_gold  y  solo_en_replica, solo_en_gold, filas_con_diferencias en 0
+-- Resultado esperado: filas_replica igual a filas_gold, y solo_en_replica, solo_en_gold y filas_con_diferencias en 0
 
 -- 4) Un registro puntual, para compararlo uno a uno con lo que muestra Dremio
 SELECT * FROM lakehouse.gold.cant_post_x_user_hist ORDER BY total_posts DESC, user_id LIMIT 5;

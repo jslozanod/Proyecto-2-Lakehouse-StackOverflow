@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Configura Dremio la primera vez (es idempotente: se puede repetir sin problema):
-#   1. Crea el usuario administrador  ->  admin / admin12345
-#   2. Crea la fuente "nessie" (catalogo Iceberg) apuntando a MinIO
-# Uso:  bash scripts/dremio_init.sh
+# Configura Dremio la primera vez. Se puede repetir sin problema, no duplica nada:
+#   1. Crea el usuario administrador: admin / admin12345
+#   2. Crea la fuente "nessie" (el catálogo Iceberg) apuntando a MinIO
+# Se usa así:  bash scripts/dremio_init.sh
 set -u
 DREMIO="${DREMIO_URL:-http://localhost:9047}"
 USUARIO="admin"
-CLAVE="admin12345"     # Dremio exige minimo 8 caracteres con letras y numeros
+CLAVE="admin12345"     # Dremio pide mínimo 8 caracteres con letras y números
 
 echo "Esperando a Dremio en $DREMIO ..."
 for _ in $(seq 1 60); do

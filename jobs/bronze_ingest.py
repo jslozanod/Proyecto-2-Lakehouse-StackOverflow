@@ -1,11 +1,11 @@
 # %% [markdown]
-# # Bronze - Parte B: ingesta con DLT (la que ejecuta Airflow)
-# Tarea 1 del DAG. DLT lee la fuente `users` (Parquet de StackOverflow), se queda con los registros
-# del anio indicado (por defecto 2021, de enero a junio) y los guarda en el bucket `bronze` de MinIO
-# en formato Parquet: `bronze/users/2021/users_2021.parquet`.
+# # Bronze - Parte B: ingesta con DLT (la que corre Airflow)
+# Esta es la Tarea 1 del DAG. DLT lee la fuente `users` (el Parquet de StackOverflow), se queda con los
+# usuarios del año que le indiquemos (por defecto 2021, de enero a junio) y los guarda en el bucket
+# `bronze` de MinIO como Parquet: `bronze/users/2021/users_2021.parquet`.
 #
-# Escritura **override**: `write_disposition="replace"` y un nombre de archivo fijo, asi ejecutar el
-# pipeline varias veces sobrescribe el mismo archivo y no genera duplicados.
+# La escritura es **override**: usamos `write_disposition="replace"` y un nombre de archivo fijo, así que
+# si corremos el pipeline varias veces siempre se sobrescribe el mismo archivo y no se duplica nada.
 
 # %%
 import os
@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-# Los nombres de columna de Bronze se dejan tal cual vienen en la fuente (datos crudos)
+# En Bronze dejamos los nombres de las columnas tal cual vienen de la fuente (son datos crudos)
 os.environ.setdefault("SCHEMA__NAMING", "direct")
 
 ORIGEN = os.getenv("USERS_SOURCE", "/data/raw/users.parquet")
@@ -33,7 +33,7 @@ def rango_fechas(anio, mes_desde, mes_hasta):
 
 @dlt.resource(name="users", write_disposition="replace")
 def users():
-    """Lee el Parquet de origen por lotes y entrega solo los usuarios creados en el rango."""
+    """Lee el Parquet original por lotes (para no llenar la memoria) y entrega solo los usuarios creados en esos meses."""
     inicio, fin = rango_fechas(ANIO, MES_DESDE, MES_HASTA)
     tipo = pa.timestamp("ms", tz="UTC")
     ini, fi = pa.scalar(inicio, type=tipo), pa.scalar(fin, type=tipo)
@@ -45,8 +45,8 @@ def users():
             yield sub
 
 # %%
-# DLT guarda en <bucket>/<dataset_name>/<layout>. Con dataset_name="users" y este patron
-# el archivo queda en bronze/users/2021/users_2021.parquet (siempre el mismo nombre: override).
+# DLT guarda los archivos en <bucket>/<dataset_name>/<layout>. Con dataset_name="users" y este patrón
+# el archivo queda en bronze/users/2021/users_2021.parquet, siempre con el mismo nombre (así se sobrescribe).
 destino = dlt.destinations.filesystem(
     layout=str(ANIO) + "/{table_name}_" + str(ANIO) + ".{ext}",
     warn_unsafe_layout_separators=False,

@@ -1,6 +1,6 @@
-﻿# Airflow 2.9.0 + Java 17 + la MISMA distribucion de Spark que usa el cluster.
-# Asi spark-submit (SparkSubmitOperator) y el cluster comparten version, JARs
-# (Iceberg, Nessie, S3) y spark-defaults.conf, y no se descarga nada en tiempo de ejecucion.
+# Imagen de Airflow 2.9.0 con Java 17 y la misma versión de Spark que usa el clúster.
+# Así spark-submit (el SparkSubmitOperator) y el clúster tienen los mismos JARs (Iceberg, Nessie, S3)
+# y el mismo spark-defaults.conf, y no hay que descargar nada cuando se ejecuta el pipeline.
 FROM apache/airflow:2.9.0
 
 USER root
@@ -10,14 +10,14 @@ RUN apt-get update && \
 
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
-# Distribucion de Spark construida en Dockerfile.spark (contexto adicional "sparkdist")
+# Copiamos la instalación de Spark que se arma en Dockerfile.spark (en el compose se llama "sparkdist")
 COPY --from=sparkdist /opt/spark /opt/spark
 ENV SPARK_HOME=/opt/spark
 ENV PATH="/opt/spark/bin:${PATH}"
 
 USER airflow
 COPY requirements-airflow.txt /tmp/requirements.txt
-# Reintentos por si la conexion es inestable
+# Si la descarga falla por el internet inestable, reintenta hasta 5 veces antes de abortar el build
 RUN i=0; until pip install --no-cache-dir -r /tmp/requirements.txt; do \
         i=$((i+1)); \
         if [ "$i" -ge 5 ]; then echo "pip fallo 5 veces, se aborta el build"; exit 1; fi; \

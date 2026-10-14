@@ -1,8 +1,8 @@
 """
-Genera los notebooks de respaldo a partir de los scripts de jobs/ (formato "# %%").
-Asi el notebook y la tarea del DAG tienen exactamente la misma logica.
+Genera los notebooks de respaldo a partir de los scripts de la carpeta jobs/ (los que tienen marcas "# %%").
+Así el notebook y la tarea del DAG tienen exactamente la misma lógica.
 
-Uso (desde la raiz del proyecto):
+Se corre desde la raíz del proyecto:
     python scripts/make_notebooks.py
 """
 import json
@@ -12,30 +12,30 @@ RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBS = os.path.join(RAIZ, "jobs")
 NOTEBOOKS = os.path.join(RAIZ, "notebooks")
 
-# notebook -> (titulo, descripcion, [scripts de jobs que lo componen, en orden])
+# notebook -> (título, descripción, [scripts de jobs que lo forman, en orden])
 NOTEBOOKS_DEF = {
     "bronze_ingest": (
         "bronze_ingest",
-        "Respaldo manual de la **Tarea 1** del DAG. Parte A: carga manual de los Parquet que no pasan por el "
-        "pipeline. Parte B: ingesta con DLT (la que ejecuta Airflow).",
+        "Respaldo para correr a mano la **Tarea 1** del DAG. La Parte A carga los Parquet que no pasan por el "
+        "pipeline y la Parte B hace la ingesta con DLT (la misma que ejecuta Airflow).",
         ["bronze_manual.py", "bronze_ingest.py"],
     ),
     "silver_transform": (
         "silver_transform",
-        "Respaldo manual de la **Tarea 2** del DAG. Construye `silver.users_hist` y `silver.post_hist` "
+        "Respaldo para correr a mano la **Tarea 2** del DAG. Arma `silver.users_hist` y `silver.post_hist` "
         "(en el DAG solo se ejecuta `users`).",
         ["silver_transform.py"],
     ),
     "gold_agg": (
         "gold_agg",
-        "Respaldo manual de la **Tarea 3** del DAG. Genera `gold.cant_post_x_user_hist`.",
+        "Respaldo para correr a mano la **Tarea 3** del DAG. Genera `gold.cant_post_x_user_hist`.",
         ["gold_agg.py"],
     ),
 }
 
 
 def a_celdas(ruta):
-    """Parte un script en celdas usando los marcadores '# %%' y '# %% [markdown]'."""
+    """Corta un script en celdas usando las marcas '# %%' (código) y '# %% [markdown]' (texto)."""
     with open(ruta, encoding="utf-8") as f:
         lineas = f.read().splitlines()
     celdas, tipo, buf = [], None, []
@@ -69,7 +69,7 @@ def main():
         celdas = [{"cell_type": "markdown", "metadata": {},
                    "source": f"# {titulo}\n\n{desc}\n\n"
                              "Servicios: Spark `spark://spark-master:7077`, MinIO `http://minio:9000`, "
-                             "catalogo Nessie `http://nessie:19120`."}]
+                             "catálogo Nessie `http://nessie:19120`."}]
         for s in scripts:
             celdas.extend(a_celdas(os.path.join(JOBS, s)))
         nb = {
@@ -81,7 +81,7 @@ def main():
             "nbformat": 4,
             "nbformat_minor": 5,
         }
-        # nbformat 4.5 exige un id por celda
+        # el formato nbformat 4.5 pide que cada celda tenga un id
         for i, c in enumerate(nb["cells"]):
             c["id"] = f"celda-{i:02d}"
         destino = os.path.join(NOTEBOOKS, f"{nombre}.ipynb")

@@ -1,5 +1,5 @@
-﻿# JupyterLab para la ejecucion manual (notebooks de respaldo).
-# Usa la misma distribucion de Spark del cluster (mismos JARs y spark-defaults.conf).
+# JupyterLab para correr a mano los notebooks de respaldo.
+# Usa la misma instalación de Spark del clúster, con los mismos JARs y el mismo spark-defaults.conf.
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update && \

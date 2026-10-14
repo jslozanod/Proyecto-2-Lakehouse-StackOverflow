@@ -43,8 +43,8 @@ COPY spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 # 5. Instalar librerías de Python para los Workers
 RUN pip install --no-cache-dir pandas boto3 pyspark==3.5.5 pyarrow
 
-# 6. Java 17 en el cluster. La imagen base trae Java 11, cuyo compilador JIT se cae (SIGSEGV) al ejecutar
-#    Gold; ademas asi los ejecutores usan la misma version de Java que el driver (Airflow y Jupyter).
+# 6. Java 17 en el clúster. La imagen base trae Java 11 y su compilador se caía (SIGSEGV) al correr Gold.
+#    Con Java 17 los ejecutores usan la misma versión que el driver (Airflow y Jupyter).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends openjdk-17-jre-headless && \
     apt-get clean && rm -rf /var/lib/apt/lists/*

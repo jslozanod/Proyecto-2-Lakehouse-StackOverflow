@@ -1,25 +1,26 @@
-﻿# =====================================================================================
-#  PROYECTO 2 - Arquitectura Lakehouse (Medallion) con el dataset de StackOverflow
+# =====================================================================================
+#  PROYECTO 2 - Lakehouse con arquitectura Medallion y el dataset de StackOverflow
 #  Frameworks y Herramientas para Big Data - Grupo 3
 #
-#  Flujo:  DLT -> Bronze (Parquet, MinIO)  ->  Spark -> Silver (Iceberg, merge)
-#                                           ->  Spark -> Gold   (Iceberg, merge)
-#  Orquestado por Airflow (1 DAG, 3 tareas). Consulta con Trino (Silver) y Dremio (Gold).
+#  Acá levantamos todo el proyecto con un solo comando. Los datos pasan por tres capas:
+#  DLT -> Bronze (Parquet en MinIO) -> Spark -> Silver (Iceberg) -> Spark -> Gold (Iceberg).
+#  Airflow dispara el pipeline completo, y después consultamos con Trino (Silver) y Dremio (Gold).
 #
-#  Credenciales de laboratorio (las mismas en todos los servicios): admin / password
-#  Despliegue:  docker compose up -d --build     (ver README.md)
+#  Las claves de este laboratorio son las mismas en todos los servicios: admin / password.
+#  Para levantarlo:  docker compose up -d --build   (los pasos completos están en el README)
 # =====================================================================================
 
-# ---------- Variables comunes (anclas YAML) ----------
+# ---------- Cosas que se repiten en varios servicios (anclas de YAML) ----------
 
-# Credenciales S3 (MinIO) que leen Spark, DLT y los notebooks desde el entorno
+# Usuario y clave de MinIO. Spark, DLT y los notebooks las leen de estas variables de entorno.
 x-s3-env: &s3-env
   AWS_ACCESS_KEY_ID: admin
   AWS_SECRET_ACCESS_KEY: password
   AWS_REGION: us-east-1
   AWS_DEFAULT_REGION: us-east-1
 
-# Configuracion comun de Airflow (LocalExecutor: las tareas corren en el scheduler)
+# Configuración que comparten los servicios de Airflow. Usamos LocalExecutor: las tareas corren dentro
+# del scheduler, así no hacen falta Redis ni workers aparte.
 x-airflow-common: &airflow-common
   build:
     context: .
@@ -34,7 +35,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-    # DLT (Bronze): destino = bucket "bronze" de MinIO
+    # Acá le decimos a DLT que guarde en el bucket "bronze" de MinIO
     DESTINATION__FILESYSTEM__BUCKET_URL: s3://bronze
     DESTINATION__FILESYSTEM__CREDENTIALS__AWS_ACCESS_KEY_ID: admin
     DESTINATION__FILESYSTEM__CREDENTIALS__AWS_SECRET_ACCESS_KEY: password
@@ -42,7 +43,7 @@ x-airflow-common: &airflow-common
     DESTINATION__FILESYSTEM__CREDENTIALS__REGION_NAME: us-east-1
     DLT_PROJECT_DIR: /tmp/dlt
     RUNTIME__DLTHUB_TELEMETRY: "false"
-    # Origen de users para el pipeline y recorte de fechas (ver README)
+    # De dónde lee DLT los usuarios y qué meses nos quedamos (enero a junio, ver README)
     USERS_SOURCE: /data/raw/users.parquet
     USERS_YEAR: "2021"
     FECHA_DESDE_MES: "1"
@@ -60,7 +61,8 @@ x-airflow-common: &airflow-common
 services:
 
   # ------------------------------------------------------------------ ALMACENAMIENTO
-  # MinIO: object storage compatible con S3. Buckets: bronze, silver, gold, warehouse.
+  # MinIO es nuestro almacenamiento tipo S3. Acá viven los datos de las tres capas (buckets bronze, silver
+  # y gold) y el bucket warehouse del catálogo.
   minio:
     image: minio/minio:latest
     container_name: lakehouse_minio
@@ -82,7 +84,8 @@ services:
     restart: unless-stopped
     networks: [lakehouse_net]
 
-  # Crea los buckets de la arquitectura Medallion al arrancar (idempotente)
+  # Este contenedor corre una vez al arrancar y crea los buckets. Si ya existen no hace nada,
+  # así que se puede repetir sin problema.
   minio-init:
     image: minio/mc:latest
     container_name: lakehouse_minio_init
@@ -97,7 +100,8 @@ services:
     networks: [lakehouse_net]
 
   # ------------------------------------------------------------------ BASE DE DATOS
-  # PostgreSQL: guarda los metadatos de Airflow (db "airflow") y el catalogo Nessie (db "nessie")
+  # PostgreSQL guarda dos cosas: lo de Airflow (base "airflow") y el catálogo de Nessie (base "nessie").
+  # Por eso el catálogo no se pierde aunque reiniciemos los contenedores.
   postgres:
     image: postgres:16
     container_name: lakehouse_postgres
@@ -118,7 +122,8 @@ services:
     networks: [lakehouse_net]
 
   # ------------------------------------------------------------------ CATALOGO
-  # Nessie: catalogo de metadatos de Iceberg (versionado tipo Git). PERSISTENTE en PostgreSQL.
+  # Nessie es el catálogo de las tablas Iceberg: sabe dónde está cada tabla y guarda su historial como Git.
+  # Su estado queda en PostgreSQL, por eso es persistente.
   nessie:
     image: ghcr.io/projectnessie/nessie:latest
     container_name: lakehouse_nessie
@@ -150,7 +155,8 @@ services:
     networks: [lakehouse_net]
 
   # ------------------------------------------------------------------ PROCESAMIENTO
-  # Spark (standalone): master + worker. Imagen propia con JARs de Iceberg, Nessie y S3 incluidos.
+  # Spark en modo standalone, con un master y un worker. Armamos una imagen propia que ya trae los JARs de
+  # Iceberg, Nessie y S3, así no se descarga nada cuando se ejecuta el pipeline.
   spark-master:
     build:
       context: .
@@ -188,7 +194,8 @@ services:
     networks: [lakehouse_net]
 
   # ------------------------------------------------------------------ ORQUESTACION
-  # Airflow: inicializa la base de datos, crea el usuario y la conexion "spark_default"
+  # Este contenedor prepara Airflow una sola vez: migra su base de datos, crea el usuario admin y la
+  # conexión "spark_default" que usan las tareas de Spark.
   airflow-init:
     <<: *airflow-common
     container_name: lakehouse_airflow_init
@@ -206,7 +213,7 @@ services:
         airflow connections add spark_default --conn-type spark --conn-host spark://spark-master --conn-port 7077
         "
 
-  # Interfaz web de Airflow
+  # La página web de Airflow, donde le damos Play al DAG
   airflow-webserver:
     <<: *airflow-common
     container_name: lakehouse_airflow_web
@@ -227,7 +234,8 @@ services:
     mem_limit: 1536m
     restart: unless-stopped
 
-  # Scheduler: dispara el DAG y ejecuta las tareas (el driver de Spark corre aqui, el calculo en el cluster)
+  # El scheduler es el que ejecuta las tareas del DAG. Acá corre el driver de Spark, pero el trabajo pesado
+  # lo hace el worker del clúster.
   airflow-scheduler:
     <<: *airflow-common
     container_name: lakehouse_airflow_scheduler
@@ -243,7 +251,7 @@ services:
     restart: unless-stopped
 
   # ------------------------------------------------------------------ EJECUCION MANUAL
-  # Jupyter: notebooks de respaldo (bronze_ingest, silver_transform, gold_agg)
+  # Jupyter, para correr a mano los tres notebooks (bronze_ingest, silver_transform y gold_agg) si Airflow falla
   jupyter:
     build:
       context: .
@@ -280,14 +288,15 @@ services:
     networks: [lakehouse_net]
 
   # ------------------------------------------------------------------ CONSULTA SQL
-  # Trino: consulta las tablas de SILVER (y replica GOLD con SQL). Catalogo: lakehouse
+  # Trino lee las tablas de Silver, y con él replicamos Gold con SQL para comprobar que quedó bien.
+  # El catálogo se llama "lakehouse".
   trino:
     image: trinodb/trino:483
     container_name: lakehouse_trino
     ports:
       - "8082:8080"
     environment:
-      # Limita el heap de la JVM: sin esto crece hasta el 80% del limite del contenedor
+      # Limitamos la memoria de Java en Trino. Sin esto usa hasta el 80% del contenedor y se reinicia cuando falta RAM.
       JAVA_TOOL_OPTIONS: "-Xmx2200M"
     volumes:
       - ./trino/config.properties:/etc/trino/config.properties:ro
@@ -297,7 +306,7 @@ services:
     restart: unless-stopped
     networks: [lakehouse_net]
 
-  # Dremio: consulta las tablas de GOLD (fuente Nessie, ver README para configurarla)
+  # Dremio lee las tablas de Gold. La fuente Nessie se crea con scripts/dremio_init.sh (ver README).
   dremio:
     image: dremio/dremio-oss:latest
     platform: linux/x86_64

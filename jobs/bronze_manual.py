@@ -1,12 +1,12 @@
 # %% [markdown]
 # # Bronze - Parte A: carga manual
-# Segun el enunciado, solo `users_2021` entra por el pipeline (DLT). El resto de Bronze se carga a mano:
-# `post_2020`, `post_2021` y `users_2020`.
+# El enunciado dice que solo `users_2021` pasa por el pipeline con DLT. El resto de Bronze lo cargamos a mano
+# una sola vez: `post_2020`, `post_2021` y `users_2020`.
 #
-# Para no ahogar los equipos, cada Parquet original se recorta a un rango de meses (por defecto enero a
-# junio) con DuckDB, que filtra archivos grandes con memoria acotada, y luego se sube a MinIO (bucket `bronze`).
-# Rutas resultantes: `bronze/post/2020/post_2020.parquet`, `bronze/post/2021/post_2021.parquet`,
-# `bronze/users/2020/users_2020.parquet`.
+# Los archivos originales son enormes, así que los recortamos a unos meses (por defecto enero a junio) con
+# DuckDB, que filtra Parquet grandes sin llenar la memoria, y después los subimos a MinIO (bucket `bronze`).
+# Quedan en: `bronze/post/2020/post_2020.parquet`, `bronze/post/2021/post_2021.parquet`
+# y `bronze/users/2020/users_2020.parquet`.
 
 # %%
 import os
@@ -20,22 +20,22 @@ MES_HASTA = int(os.getenv("FECHA_HASTA_MES", "6"))
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
 BUCKET = "bronze"
 
-# (archivo origen, tabla en bronze, anio)
+# (archivo original, nombre de la tabla en bronze, año)
 CARGAS_MANUALES = [
     ("posts_2020.parquet", "post", 2020),
     ("posts_2021.parquet", "post", 2021),
-    ("users.parquet", "users", 2020),   # users.parquet trae todos los anios: se recorta a 2020
+    ("users.parquet", "users", 2020),   # users.parquet trae todos los años, acá nos quedamos con los de 2020
 ]
 
 # %%
 def rango_fechas(anio, mes_desde, mes_hasta):
-    """Devuelve [inicio, fin) del rango de meses, como texto UTC para SQL."""
+    """Arma el rango de fechas [inicio, fin) de los meses que queremos, como texto en UTC para usarlo en el SQL."""
     fin_anio, fin_mes = (anio + 1, 1) if mes_hasta == 12 else (anio, mes_hasta + 1)
     return f"{anio}-{mes_desde:02d}-01 00:00:00+00", f"{fin_anio}-{fin_mes:02d}-01 00:00:00+00"
 
 
 def recortar_parquet(origen, destino, anio, mes_desde, mes_hasta):
-    """Deja en `destino` solo las filas de `origen` creadas en [anio, meses]. Devuelve el numero de filas."""
+    """Lee el Parquet original y guarda solo las filas creadas en ese año y esos meses. Devuelve cuántas filas quedaron."""
     inicio, fin = rango_fechas(anio, mes_desde, mes_hasta)
     os.makedirs(os.path.dirname(destino), exist_ok=True)
     con = duckdb.connect()
@@ -52,7 +52,7 @@ def recortar_parquet(origen, destino, anio, mes_desde, mes_hasta):
 
 
 def subir_a_minio(ruta_local, clave):
-    """Sube el archivo al bucket bronze de MinIO (sobrescribe si ya existe: override)."""
+    """Sube el archivo al bucket bronze. Si ya existía lo reemplaza, que es lo que queremos en Bronze (override)."""
     fs = s3fs.S3FileSystem(
         key=os.getenv("AWS_ACCESS_KEY_ID", "admin"),
         secret=os.getenv("AWS_SECRET_ACCESS_KEY", "password"),
